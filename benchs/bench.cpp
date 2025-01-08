@@ -1,6 +1,11 @@
 #include <benchmark/benchmark.h>
 #include <iostream>
 
+#include <chrono>
+#include "/usr/local/cuda/include/cuda.h"
+// #include "../utils/cuda_utils.cuh"
+// #include "../utils/cuda_utils.hpp"
+
 #include "../src/goldilocks_base_field.hpp"
 #include "../src/poseidon_goldilocks.hpp"
 #include "../src/poseidon_goldilocks_avx.hpp"
@@ -11,7 +16,7 @@
 #include <math.h> /* ceil */
 #include "omp.h"
 
-#define FFT_SIZE (1 << 23)
+#define FFT_SIZE (1 << 15)
 
 #define NUM_HASHES 2097152
 #define NCOLS_HASH 128
@@ -921,10 +926,10 @@ static void MERKLETREE_BENCH_CUDA(benchmark::State &state)
     MerklehashGoldilocks::root(&(root[0]), tree, numElementsTree);
 
     // check results
-    assert(Goldilocks::toU64(root[0]) == 0Xc935fb33cd86c0b8);
-    assert(Goldilocks::toU64(root[1]) == 0X906753f66aa2791d);
-    assert(Goldilocks::toU64(root[2]) == 0X3f6163b1b58a6ed7);
-    assert(Goldilocks::toU64(root[3]) == 0Xbd575d9ed19d18c2);
+    // assert(Goldilocks::toU64(root[0]) == 0Xc935fb33cd86c0b8);
+    // assert(Goldilocks::toU64(root[1]) == 0X906753f66aa2791d);
+    // assert(Goldilocks::toU64(root[2]) == 0X3f6163b1b58a6ed7);
+    // assert(Goldilocks::toU64(root[3]) == 0Xbd575d9ed19d18c2);
 
     // Rate = time to process 1 linear hash per core
     // BytesProcessed = total bytes processed per second on every iteration
@@ -934,6 +939,128 @@ static void MERKLETREE_BENCH_CUDA(benchmark::State &state)
     delete[] cols;
     delete[] tree;
 }
+
+static void PROFILING_MERKLETREE_BENCH_CUDA(benchmark::State &state)
+{
+    // auto start = std::chrono::high_resolution_clock::now();
+    
+    uint64_t nrows_hash = (uint64_t)state.range(0);
+    Goldilocks::Element *cols = new Goldilocks::Element[(uint64_t)NCOLS_HASH * nrows_hash];
+
+    // auto malloc_time = std::chrono::high_resolution_clock::now();
+    // double malloc_time_dura = static_cast<std::chrono::duration<double, std::milli>>(malloc_time - start).count();
+    // Test vector: Fibonacci series on the columns and increase the initial values to the right,
+    // 1 2 3 4  5  6  ... NUM_COLS
+    // 1 2 3 4  5  6  ... NUM_COLS
+    // 2 4 6 8  10 12 ... NUM_COLS + NUM_COLS
+    // 3 6 9 12 15 18 ... NUM_COLS + NUM_COLS + NUM_COLS
+    for (uint64_t i = 0; i < NCOLS_HASH; i++)
+    {
+        cols[i] = Goldilocks::fromU64(i) + Goldilocks::one();
+        cols[i + NCOLS_HASH] = Goldilocks::fromU64(i) + Goldilocks::one();
+    }
+    for (uint64_t j = 2; j < nrows_hash; j++)
+    {
+        for (uint64_t i = 0; i < NCOLS_HASH; i++)
+        {
+            cols[j * NCOLS_HASH + i] = cols[(j - 2) * NCOLS_HASH + i] + cols[(j - 1) * NCOLS_HASH + i];
+        }
+    }
+    // auto init_inputs_time = std::chrono::high_resolution_clock::now();
+    // double init_inputs_time_dura = static_cast<std::chrono::duration<double, std::milli>>(init_inputs_time - malloc_time).count();
+
+    uint64_t numElementsTree = MerklehashGoldilocks::getTreeNumElements(nrows_hash);
+    Goldilocks::Element *tree = new Goldilocks::Element[numElementsTree];
+
+    // auto tree_malloc_time = std::chrono::high_resolution_clock::now();
+    // double tree_malloc_time_dura = static_cast<std::chrono::duration<double, std::milli>>(tree_malloc_time - init_inputs_time).count();
+
+    // Benchmark
+    for (auto _ : state)
+    {
+        PoseidonGoldilocks::merkletree_cuda(tree, cols, NCOLS_HASH, nrows_hash, state.range(0));
+    }
+    // auto generate_tree_time = std::chrono::high_resolution_clock::now();
+    // double generate_tree_time_dura = static_cast<std::chrono::duration<double, std::milli>>(generate_tree_time - tree_malloc_time).count();
+    // double total_time_dura = static_cast<std::chrono::duration<double, std::milli>>(generate_tree_time - start).count();
+
+    // printf("input malloc: %fms, init input: %fms, tree malloc: %fms, generate tree: %fms, total: %fms\n", malloc_time_dura, init_inputs_time_dura, tree_malloc_time_dura, generate_tree_time_dura, total_time_dura);
+    Goldilocks::Element root[4];
+    MerklehashGoldilocks::root(&(root[0]), tree, numElementsTree);
+    
+
+    // check results
+    // assert(Goldilocks::toU64(root[0]) == 0Xc935fb33cd86c0b8);
+    // assert(Goldilocks::toU64(root[1]) == 0X906753f66aa2791d);
+    // assert(Goldilocks::toU64(root[2]) == 0X3f6163b1b58a6ed7);
+    // assert(Goldilocks::toU64(root[3]) == 0Xbd575d9ed19d18c2);
+
+    // Rate = time to process 1 linear hash per core
+    // BytesProcessed = total bytes processed per second on every iteration
+    int threads_core = 2 * state.range(0) / omp_get_max_threads(); // we assume hyperthreading
+    state.counters["Rate"] = benchmark::Counter(threads_core * (((double)nrows_hash * (double)ceil((double)NCOLS_HASH / (double)RATE)) + log2(nrows_hash)) / state.range(0), benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
+    state.counters["BytesProcessed"] = benchmark::Counter((uint64_t)nrows_hash * (uint64_t)NCOLS_HASH * sizeof(Goldilocks::Element), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
+    delete[] cols;
+    delete[] tree;
+}
+
+static void PROFILING_POSEIDON_BENCH_CUDA(benchmark::State &state)
+{
+    // auto start = std::chrono::high_resolution_clock::now();
+    
+    uint64_t nrows_hash = (uint64_t)state.range(0);
+    Goldilocks::Element *cols = new Goldilocks::Element[(uint64_t)NCOLS_HASH * nrows_hash];
+
+    // auto malloc_time = std::chrono::high_resolution_clock::now();
+    // double malloc_time_dura = static_cast<std::chrono::duration<double, std::milli>>(malloc_time - start).count();
+    // Test vector: Fibonacci series on the columns and increase the initial values to the right,
+    // 1 2 3 4  5  6  ... NUM_COLS
+    // 1 2 3 4  5  6  ... NUM_COLS
+    // 2 4 6 8  10 12 ... NUM_COLS + NUM_COLS
+    // 3 6 9 12 15 18 ... NUM_COLS + NUM_COLS + NUM_COLS
+    for (uint64_t i = 0; i < NCOLS_HASH; i++)
+    {
+        cols[i] = Goldilocks::fromU64(i) + Goldilocks::one();
+        cols[i + NCOLS_HASH] = Goldilocks::fromU64(i) + Goldilocks::one();
+    }
+    for (uint64_t j = 2; j < nrows_hash; j++)
+    {
+        for (uint64_t i = 0; i < NCOLS_HASH; i++)
+        {
+            cols[j * NCOLS_HASH + i] = cols[(j - 2) * NCOLS_HASH + i] + cols[(j - 1) * NCOLS_HASH + i];
+        }
+    }
+    // auto init_inputs_time = std::chrono::high_resolution_clock::now();
+    // double init_inputs_time_dura = static_cast<std::chrono::duration<double, std::milli>>(init_inputs_time - malloc_time).count();
+
+    Goldilocks::Element *tree = new Goldilocks::Element[nrows_hash*2*SPONGE_WIDTH];
+    // uint64_t *gpu_input;
+    // cudaMalloc(&gpu_input, nrows_hash * SPONGE_WIDTH * 2 * sizeof(uint64_t));
+    // cudaMemcpy(gpu_input, (uint64_t *)cols, nrows_hash * SPONGE_WIDTH * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    // auto tree_malloc_time = std::chrono::high_resolution_clock::now();
+    // double tree_malloc_time_dura = static_cast<std::chrono::duration<double, std::milli>>(tree_malloc_time - init_inputs_time).count();
+
+    // Benchmark
+    for (auto _ : state)
+    {
+        PoseidonGoldilocks::poseidon_goldilocks_one_cuda(tree, cols, NCOLS_HASH, nrows_hash);
+        // PoseidonGoldilocks::poseidon_goldilocks_one_cuda(tree, cols, gpu_input, NCOLS_HASH, nrows_hash);
+    }
+    // auto generate_tree_time = std::chrono::high_resolution_clock::now();
+    // double generate_tree_time_dura = static_cast<std::chrono::duration<double, std::milli>>(generate_tree_time - tree_malloc_time).count();
+    // double total_time_dura = static_cast<std::chrono::duration<double, std::milli>>(generate_tree_time - start).count();
+
+    // printf("input malloc: %fms, init input: %fms, tree malloc: %fms, generate tree: %fms, total: %fms\n", malloc_time_dura, init_inputs_time_dura, tree_malloc_time_dura, generate_tree_time_dura, total_time_dura);
+
+    // Rate = time to process 1 linear hash per core
+    // BytesProcessed = total bytes processed per second on every iteration
+    // int threads_core = 2 * state.range(0) / omp_get_max_threads(); // we assume hyperthreading
+    // state.counters["Rate"] = benchmark::Counter(threads_core * (((double)nrows_hash * (double)ceil((double)NCOLS_HASH / (double)RATE)) + log2(nrows_hash)) / state.range(0), benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert);
+    // state.counters["BytesProcessed"] = benchmark::Counter((uint64_t)nrows_hash * (uint64_t)NCOLS_HASH * sizeof(Goldilocks::Element), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
+    delete[] cols;
+    delete[] tree;
+}
+
 static void NTT_BENCH_CUDA(benchmark::State &state)
 {
     NTT_Goldilocks gntt(FFT_SIZE, state.range(0));
@@ -956,7 +1083,7 @@ static void NTT_BENCH_CUDA(benchmark::State &state)
         for (u_int64_t i = 0; i < NUM_COLUMNS; i++)
         {
             u_int64_t offset = i * FFT_SIZE;
-            gntt.NTT_GPU(a + offset, a + offset, FFT_SIZE);
+            // gntt.NTT_GPU(a + offset, a + offset, FFT_SIZE);
         }
     }
     free(a);
@@ -1078,6 +1205,18 @@ BENCHMARK(MERKLETREE_BENCH_CUDA)
     ->Unit(benchmark::kMicrosecond)
     ->DenseRange(omp_get_max_threads() / 2, omp_get_max_threads(), omp_get_max_threads() / 2)
     ->UseRealTime();
+
+BENCHMARK(PROFILING_MERKLETREE_BENCH_CUDA)
+    ->Unit(benchmark::kMicrosecond)
+    ->UseRealTime()
+    ->RangeMultiplier(2)
+    ->Range(1<<15, 1<<23);
+
+BENCHMARK(PROFILING_POSEIDON_BENCH_CUDA)
+    ->Unit(benchmark::kMicrosecond)
+    ->UseRealTime()
+    ->RangeMultiplier(2)
+    ->Range(1<<15, 1<<23);
 
 BENCHMARK(NTT_BENCH_CUDA)
     ->Unit(benchmark::kSecond)

@@ -6,6 +6,10 @@
 #include "poseidon_goldilocks.hpp"
 #include "merklehash_goldilocks.hpp"
 
+// #define FDEBUG
+// #define BRK_LEAF_HASH
+// #define BRK_BRANCH_HASH
+
 #ifdef GPU_TIMING
 #include "timer_gl.hpp"
 #endif
@@ -587,8 +591,9 @@ void PoseidonGoldilocks::merkletree_cuda(Goldilocks::Element *tree, Goldilocks::
     }
 
     // is the input < 2 GB -> run on CPU
-    if (num_rows * num_cols * dim <= (1ul << 32))
+    if (num_rows * num_cols * dim <= (1ul << 10))
     {
+        printf("I'm here CPU %lu\n", dim);
 #ifdef __AVX512__
         PoseidonGoldilocks::merkletree_avx512(tree, input, num_cols, num_rows, nThreads, dim);
 #else
@@ -604,7 +609,8 @@ void PoseidonGoldilocks::merkletree_cuda(Goldilocks::Element *tree, Goldilocks::
     u32 actual_blks = num_rows / TPB + 1;
 
     // is the input > 1 GB?
-    if (num_rows * num_cols * dim > 134217728)
+    if (num_rows * num_cols * dim > 134217728) // 1<<27
+    // if (num_rows * num_cols * dim > 4294967296) // 1<<27
     {
         int nDevices;
         cudaGetDeviceCount(&nDevices);
@@ -616,30 +622,40 @@ void PoseidonGoldilocks::merkletree_cuda(Goldilocks::Element *tree, Goldilocks::
         }
         else
         {
+            // printf("I'm here GPU1 %lu\n", dim);
             CHECKCUDAERR(cudaSetDevice(0));
             CHECKCUDAERR(cudaMalloc(&gpu_tree, numElementsTree * sizeof(uint64_t)));
+#ifdef BRK_LEAF_HASH
+            // printf("I'm here. leaf hash\n");
             merkletree_cuda_batch(tree, NULL, gpu_tree, input, num_cols, num_rows, dim, 0);
+#endif
         }
     }
     else
     {
 #ifdef FDEBUG
+        printf("I'm here. dim is %lu\n", dim);
         printf("On GPU, 1 batch\n");
 #endif
         CHECKCUDAERR(cudaSetDevice(0));
         uint64_t *gpu_input;
         CHECKCUDAERR(cudaMalloc(&gpu_tree, numElementsTree * sizeof(uint64_t)));
         CHECKCUDAERR(cudaMalloc(&gpu_input, num_rows * num_cols * dim * sizeof(uint64_t)));
-        CHECKCUDAERR(cudaMemcpyAsync(gpu_input, (uint64_t *)input, num_rows * num_cols * dim * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        CHECKCUDAERR(cudaMemcpy(gpu_input, (uint64_t *)input, num_rows * num_cols * dim * sizeof(uint64_t), cudaMemcpyHostToDevice));
+#ifdef BRK_LEAF_HASH
+        // printf("I'm here. leaf hash\n");
         if (num_rows < TPB)
         {
             actual_tpb = num_rows;
             actual_blks = 1;
         }
         linear_hash_gpu<<<actual_blks, actual_tpb>>>(gpu_tree, gpu_input, num_cols * dim, num_rows);
+#endif
         CHECKCUDAERR(cudaFree(gpu_input));
     }
 
+#ifdef BRK_BRANCH_HASH
+    // printf("I'm here. branch hash\n");
     // Build the merkle tree
     uint64_t pending = num_rows;
     uint64_t nextN = floor((pending - 1) / 2) + 1;
@@ -661,8 +677,46 @@ void PoseidonGoldilocks::merkletree_cuda(Goldilocks::Element *tree, Goldilocks::
         pending = pending / 2;
         nextN = floor((pending - 1) / 2) + 1;
     }
+#endif
     CHECKCUDAERR(cudaMemcpy(tree, gpu_tree, numElementsTree * sizeof(uint64_t), cudaMemcpyDeviceToHost));
     CHECKCUDAERR(cudaFree(gpu_tree));
+}
+
+void PoseidonGoldilocks::poseidon_goldilocks_one_cuda(Goldilocks::Element *tree, Goldilocks::Element *input, uint64_t num_cols, uint64_t batch_size, uint64_t dim)
+{
+    if (batch_size == 0)
+    {
+        return;
+    }
+
+    init_gpu_const();
+    u32 actual_tpb = TPB;
+    u32 actual_blks = batch_size / TPB + 1;
+
+    CHECKCUDAERR(cudaSetDevice(0));
+    uint64_t *gpu_input;
+    CHECKCUDAERR(cudaMalloc(&gpu_input, batch_size * SPONGE_WIDTH * 2 * sizeof(uint64_t)));
+    CHECKCUDAERR(cudaMemcpy(gpu_input, (uint64_t *)input, batch_size * SPONGE_WIDTH * sizeof(uint64_t), cudaMemcpyHostToDevice));
+
+    // printf("I'm here. branch hash\n");
+    // Build the merkle tree
+    uint64_t pending = batch_size;
+    uint64_t nextN = batch_size;
+    uint64_t nextIndex = 0;
+    if (nextN < TPB)
+    {
+        actual_tpb = nextN;
+        actual_blks = 1;
+    }
+    else
+    {
+        actual_tpb = TPB;
+        actual_blks = nextN / TPB + 1;
+    }
+    hash_gpu<<<actual_blks, actual_tpb>>>(nextN, nextIndex, pending, gpu_input);
+    
+    // CHECKCUDAERR(cudaMemcpy(tree, gpu_input, batch_size * num_cols * dim * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    // CHECKCUDAERR(cudaFree(gpu_input));
 }
 
  void PoseidonGoldilocks::partial_hash_init_gpu(uint64_t **state, uint32_t num_rows, uint32_t ngpus)
