@@ -716,7 +716,7 @@ void PoseidonGoldilocks::poseidon_goldilocks_one_cuda(Goldilocks::Element *tree,
     hash_gpu<<<actual_blks, actual_tpb>>>(nextN, nextIndex, pending, gpu_input);
     
     // CHECKCUDAERR(cudaMemcpy(tree, gpu_input, batch_size * num_cols * dim * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    // CHECKCUDAERR(cudaFree(gpu_input));
+    CHECKCUDAERR(cudaFree(gpu_input));
 }
 
  void PoseidonGoldilocks::partial_hash_init_gpu(uint64_t **state, uint32_t num_rows, uint32_t ngpus)
